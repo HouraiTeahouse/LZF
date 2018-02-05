@@ -1,4 +1,7 @@
 ﻿/*
+ * Addition of ArrayPool.
+ * Copyright (c) 2016 James Liu <contact@jamessliu.com>
+ *
  * Fewer allocations version:
  * Copyright (c) 2016 Chase Pettit <chasepettit@gmail.com>
  * 
@@ -36,386 +39,336 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  * 
  */
+// TODO(james7132): Replace with System.Buffers.ArrayPool when Unity 2018.1b is ready
+using HouraiTeahouse;
 using System;
 
 /// <summary>
 /// Improved C# LZF Compressor, a very small data compression library. The compression algorithm is extremely fast.
 /// </summary>
-public class CLZF2
-{
-    #region Tunable Constants
+public class CLZF2 {
 
-    /// <summary>
-    /// Multiple of input size used to estimate work/output buffer size.
-    /// Larger values increase initial memory usage but potentially reduces number of allocations.
-    /// </summary>
-    private const int BUFFER_SIZE_ESTIMATE = 2;
+  /// <summary>
+  /// Multiple of input size used to estimate work/output buffer size.
+  /// Larger values increase initial memory usage but potentially reduces number of allocations.
+  /// </summary>
+  private const int BUFFER_SIZE_ESTIMATE = 2;
 
-    /// <summary>
-    /// Size of hashtable is 2^HLOG bytes. 
-    /// Decompression is independent of the hash table size.
-    /// The difference between 15 and 14 is very small
-    /// for small blocks (and 14 is usually a bit faster).
-    /// For a low-memory/faster configuration, use HLOG == 13;
-    /// For best compression, use 15 or 16 (or more, up to 22).
-    /// </summary>
-    private const uint HLOG = 14;
+  /// <summary>
+  /// Size of hashtable is 2^HLOG bytes. 
+  /// Decompression is independent of the hash table size.
+  /// The difference between 15 and 14 is very small
+  /// for small blocks (and 14 is usually a bit faster).
+  /// For a low-memory/faster configuration, use HLOG == 13;
+  /// For best compression, use 15 or 16 (or more, up to 22).
+  /// </summary>
+  private const uint HLOG = 14;
 
-    #endregion
+  private const uint HSIZE = (1 << (int)HLOG);
+  private const uint MAX_LIT = (1 << 5);
+  private const uint MAX_OFF = (1 << 13);
+  private const uint MAX_REF = ((1 << 8) + (1 << 3));
 
-    # region Other Constants (Do Not Modify)
+  /// <summary>
+  /// Hashtable, that can be allocated only once.
+  /// </summary>
+  private static readonly long[] HashTable = new long[HSIZE];
 
-    private const uint HSIZE = (1 << (int)HLOG);
-    private const uint MAX_LIT = (1 << 5);
-    private const uint MAX_OFF = (1 << 13);
-    private const uint MAX_REF = ((1 << 8) + (1 << 3));
+  /// <summary>
+  /// Lock object for access to hashtable so that we can keep things thread safe.
+  /// Still up to the caller to make sure any shared outputBuffer use is thread safe.
+  /// </summary>
+  private static readonly object hashTableLock = new object();
 
-    #endregion
+  /// <summary>
+  /// Compress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to compress.</param>
+  /// <returns>Compressed bytes.</returns>
+  public static byte[] Compress(byte[] inputBytes) => Compress(inputBytes, inputBytes.Length);
 
-    #region Fields
+  /// <summary>
+  /// Compress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to compress.</param>
+  /// <param name="inputLength">Length of data in inputBytes to decompress.</param>
+  /// <returns>Compressed bytes.</returns>
+  public static byte[] Compress(byte[] inputBytes, int inputLength) {
+    byte[] tempBuffer = null;
+    int byteCount = Compress(inputBytes, ref tempBuffer, inputLength);
 
-    /// <summary>
-    /// Hashtable, that can be allocated only once.
-    /// </summary>
-    private static readonly long[] HashTable = new long[HSIZE];
+    byte[] outputBytes = new byte[byteCount];
+    Buffer.BlockCopy(tempBuffer, 0, outputBytes, 0, byteCount);
+    return outputBytes;
+  }
 
-    /// <summary>
-    /// Lock object for access to hashtable so that we can keep things thread safe.
-    /// Still up to the caller to make sure any shared outputBuffer use is thread safe.
-    /// </summary>
-    private static readonly object locker = new object();
+  /// <summary>
+  /// Compress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to compress.</param>
+  /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
+  /// <returns>Length of output.</returns>
+  public static int Compress(byte[] inputBytes, ref byte[] outputBuffer) {
+    return Compress(inputBytes, ref outputBuffer, inputBytes.Length);
+  }
 
-    #endregion
-
-    #region Public Methods
-
-    /// <summary>
-    /// Compress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to compress.</param>
-    /// <returns>Compressed bytes.</returns>
-    public static byte[] Compress(byte[] inputBytes)
-    {
-        return Compress(inputBytes, inputBytes.Length);
+  /// <summary>
+  /// Compress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to compress.</param>
+  /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
+  /// <param name="inputLength">Length of data in inputBytes.</param>
+  /// <returns>Length of output.</returns>
+  public static int Compress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength) {
+    // Estimate necessary output buffer size.
+    var arrayPool = ArrayPool<byte>.Shared;
+    int outputByteCountGuess = inputBytes.Length * BUFFER_SIZE_ESTIMATE;
+    if (outputBuffer == null || outputBuffer.Length < outputByteCountGuess) {
+      if (outputBuffer != null) arrayPool.Return(outputBuffer);
+      outputBuffer = ArrayPool<byte>.Shared.Rent(outputByteCountGuess);
     }
 
-    /// <summary>
-    /// Compress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to compress.</param>
-    /// <param name="inputLength">Length of data in inputBytes to decompress.</param>
-    /// <returns>Compressed bytes.</returns>
-    public static byte[] Compress(byte[] inputBytes, int inputLength)
-    {
-        byte[] tempBuffer = null;
-        int byteCount = Compress(inputBytes, ref tempBuffer, inputLength);
+    int byteCount = lzf_compress(inputBytes, ref outputBuffer, inputLength);
 
-        byte[] outputBytes = new byte[byteCount];
-        Buffer.BlockCopy(tempBuffer, 0, outputBytes, 0, byteCount);
-        return outputBytes;
+    // If byteCount is 0, increase buffer size and try again.
+    while (byteCount == 0) {
+      outputByteCountGuess *= 2;
+      arrayPool.Return(outputBuffer);
+      outputBuffer = arrayPool.Rent(outputByteCountGuess);
+      byteCount = lzf_compress(inputBytes, ref outputBuffer, inputLength);
     }
 
-    /// <summary>
-    /// Compress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to compress.</param>
-    /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
-    /// <returns>Length of output.</returns>
-    public static int Compress(byte[] inputBytes, ref byte[] outputBuffer)
-    {
-        return Compress(inputBytes, ref outputBuffer, inputBytes.Length);
+    return byteCount;
+  }
+
+  /// <summary>
+  /// Decompress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to decompress.</param>
+  /// <returns>Decompressed bytes.</returns>
+  public static byte[] Decompress(byte[] inputBytes) {
+    return Decompress(inputBytes, inputBytes.Length);
+  }
+
+  /// <summary>
+  /// Decompress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to decompress.</param>
+  /// <param name="inputLength">Length of data in inputBytes to decompress.</param>
+  /// <returns>Decompressed bytes.</returns>
+  public static byte[] Decompress(byte[] inputBytes, int inputLength) {
+    byte[] tempBuffer = null;
+    int byteCount = Decompress(inputBytes, ref tempBuffer, inputLength);
+
+    byte[] outputBytes = new byte[byteCount];
+    Buffer.BlockCopy(tempBuffer, 0, outputBytes, 0, byteCount);
+    return outputBytes;
+  }
+
+  /// <summary>
+  /// Decompress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to decompress.</param>
+  /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
+  /// <returns>Length of output.</returns>
+  public static int Decompress(byte[] inputBytes, ref byte[] outputBuffer) {
+    return Decompress(inputBytes, ref outputBuffer, inputBytes.Length);
+  }
+
+  /// <summary>
+  /// Decompress input bytes.
+  /// </summary>
+  /// <param name="inputBytes">Bytes to decompress.</param>
+  /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
+  /// <param name="inputLength">Length of data in inputBytes.</param>
+  /// <returns>Length of output.</returns>
+  public static int Decompress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength) {
+    // Estimate necessary output buffer size.
+    var arrayPool = ArrayPool<byte>.Shared;
+    int outputByteCountGuess = inputBytes.Length * BUFFER_SIZE_ESTIMATE;
+    if (outputBuffer == null || outputBuffer.Length < outputByteCountGuess) {
+      if (outputBuffer != null) arrayPool.Return(outputBuffer);
+      outputBuffer = arrayPool.Rent(outputByteCountGuess);
     }
 
-    /// <summary>
-    /// Compress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to compress.</param>
-    /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
-    /// <param name="inputLength">Length of data in inputBytes.</param>
-    /// <returns>Length of output.</returns>
-    public static int Compress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength)
-    {
-        // Estimate necessary output buffer size.
-        int outputByteCountGuess = inputBytes.Length * BUFFER_SIZE_ESTIMATE;
-        if (outputBuffer == null || outputBuffer.Length < outputByteCountGuess)
-            outputBuffer = new byte[outputByteCountGuess];
+    int byteCount = lzf_decompress(inputBytes, ref outputBuffer, inputLength);
 
-        int byteCount = lzf_compress(inputBytes, ref outputBuffer, inputLength);
+    // If byteCount is 0, increase buffer size and try again.
+    while (byteCount == 0) {
+      outputByteCountGuess *= 2;
+      arrayPool.Return(outputBuffer);
+      outputBuffer = arrayPool.Rent(outputByteCountGuess);
+      byteCount = lzf_decompress(inputBytes, ref outputBuffer, inputLength);
+    }
 
-        // If byteCount is 0, increase buffer size and try again.
-        while (byteCount == 0)
+    return byteCount;
+  }
+
+  /// <summary>
+  /// Compresses the data using LibLZF algorithm.
+  /// </summary>
+  /// <param name="input">Reference to the data to compress.</param>
+  /// <param name="output">Reference to a buffer which will contain the compressed data.</param>
+  /// <param name="inputLength">Length of input bytes to process.</param>
+  /// <returns>The size of the compressed archive in the output buffer.</returns>
+  private static int lzf_compress(byte[] input, ref byte[] output, int inputLength) {
+    int outputLength = output.Length;
+
+    long hslot;
+    uint iidx = 0;
+    uint oidx = 0;
+    long reference;
+
+    uint hval = (uint)(((input[iidx]) << 8) | input[iidx + 1]); // FRST(in_data, iidx);
+    long off;
+    int lit = 0;
+
+    // Lock so we have exclusive access to hashtable.
+    lock (hashTableLock) {
+      Array.Clear(HashTable, 0, (int)HSIZE);
+
+      for (;;) {
+        if (iidx < inputLength - 2)
         {
-            outputByteCountGuess *= 2;
-            outputBuffer = new byte[outputByteCountGuess];
-            byteCount = lzf_compress(inputBytes, ref outputBuffer, inputLength);
-        }
+            hval = (hval << 8) | input[iidx + 2];
+            hslot = ((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1));
+            reference = HashTable[hslot];
+            HashTable[hslot] = (long)iidx;
 
-        return byteCount;
-    }
-
-    /// <summary>
-    /// Decompress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to decompress.</param>
-    /// <returns>Decompressed bytes.</returns>
-    public static byte[] Decompress(byte[] inputBytes)
-    {
-        return Decompress(inputBytes, inputBytes.Length);
-    }
-
-    /// <summary>
-    /// Decompress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to decompress.</param>
-    /// <param name="inputLength">Length of data in inputBytes to decompress.</param>
-    /// <returns>Decompressed bytes.</returns>
-    public static byte[] Decompress(byte[] inputBytes, int inputLength)
-    {
-        byte[] tempBuffer = null;
-        int byteCount = Decompress(inputBytes, ref tempBuffer, inputLength);
-
-        byte[] outputBytes = new byte[byteCount];
-        Buffer.BlockCopy(tempBuffer, 0, outputBytes, 0, byteCount);
-        return outputBytes;
-    }
-
-    /// <summary>
-    /// Decompress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to decompress.</param>
-    /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
-    /// <returns>Length of output.</returns>
-    public static int Decompress(byte[] inputBytes, ref byte[] outputBuffer)
-    {
-        return Decompress(inputBytes, ref outputBuffer, inputBytes.Length);
-    }
-
-    /// <summary>
-    /// Decompress input bytes.
-    /// </summary>
-    /// <param name="inputBytes">Bytes to decompress.</param>
-    /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
-    /// <param name="inputLength">Length of data in inputBytes.</param>
-    /// <returns>Length of output.</returns>
-    public static int Decompress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength)
-    {
-        // Estimate necessary output buffer size.
-        int outputByteCountGuess = inputBytes.Length * BUFFER_SIZE_ESTIMATE;
-        if (outputBuffer == null || outputBuffer.Length < outputByteCountGuess)
-            outputBuffer = new byte[outputByteCountGuess];
-
-        int byteCount = lzf_decompress(inputBytes, ref outputBuffer, inputLength);
-
-        // If byteCount is 0, increase buffer size and try again.
-        while (byteCount == 0)
-        {
-            outputByteCountGuess *= 2;
-            outputBuffer = new byte[outputByteCountGuess];
-            byteCount = lzf_decompress(inputBytes, ref outputBuffer, inputLength);
-        }
-
-        return byteCount;
-    }
-    
-    #endregion
-
-    #region Private Methods
-
-    /// <summary>
-    /// Compresses the data using LibLZF algorithm.
-    /// </summary>
-    /// <param name="input">Reference to the data to compress.</param>
-    /// <param name="output">Reference to a buffer which will contain the compressed data.</param>
-    /// <param name="inputLength">Length of input bytes to process.</param>
-    /// <returns>The size of the compressed archive in the output buffer.</returns>
-    private static int lzf_compress(byte[] input, ref byte[] output, int inputLength)
-    {
-        int outputLength = output.Length;
-
-        long hslot;
-        uint iidx = 0;
-        uint oidx = 0;
-        long reference;
-
-        uint hval = (uint)(((input[iidx]) << 8) | input[iidx + 1]); // FRST(in_data, iidx);
-        long off;
-        int lit = 0;
-
-        // Lock so we have exclusive access to hashtable.
-        lock (locker)
-        {
-            Array.Clear(HashTable, 0, (int)HSIZE);
-
-            for (; ; )
+            if ((off = iidx - reference - 1) < MAX_OFF
+                && iidx + 4 < inputLength
+                && reference > 0
+                && input[reference + 0] == input[iidx + 0]
+                && input[reference + 1] == input[iidx + 1]
+                && input[reference + 2] == input[iidx + 2]
+                )
             {
-                if (iidx < inputLength - 2)
-                {
-                    hval = (hval << 8) | input[iidx + 2];
-                    hslot = ((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1));
-                    reference = HashTable[hslot];
-                    HashTable[hslot] = (long)iidx;
+              /* match found at *reference++ */
+              uint len = 2;
+              uint maxlen = (uint)inputLength - iidx - len;
+              maxlen = maxlen > MAX_REF ? MAX_REF : maxlen;
 
-                    if ((off = iidx - reference - 1) < MAX_OFF
-                        && iidx + 4 < inputLength
-                        && reference > 0
-                        && input[reference + 0] == input[iidx + 0]
-                        && input[reference + 1] == input[iidx + 1]
-                        && input[reference + 2] == input[iidx + 2]
-                        )
-                    {
-                        /* match found at *reference++ */
-                        uint len = 2;
-                        uint maxlen = (uint)inputLength - iidx - len;
-                        maxlen = maxlen > MAX_REF ? MAX_REF : maxlen;
+              if (oidx + lit + 1 + 3 >= outputLength) return 0;
 
-                        if (oidx + lit + 1 + 3 >= outputLength)
-                            return 0;
+              do {
+                len++;
+              } while (len < maxlen && input[reference + len] == input[iidx + len]);
 
-                        do
-                            len++;
-                        while (len < maxlen && input[reference + len] == input[iidx + len]);
+              if (lit != 0) {
+                output[oidx++] = (byte)(lit - 1);
+                lit = -lit;
+                do {
+                  output[oidx++] = input[iidx + lit];
+                } while ((++lit) != 0);
+              }
 
-                        if (lit != 0)
-                        {
-                            output[oidx++] = (byte)(lit - 1);
-                            lit = -lit;
-                            do
-                                output[oidx++] = input[iidx + lit];
-                            while ((++lit) != 0);
-                        }
+              len -= 2;
+              iidx++;
 
-                        len -= 2;
-                        iidx++;
+              if (len < 7) {
+                output[oidx++] = (byte)((off >> 8) + (len << 5));
+              } else {
+                output[oidx++] = (byte)((off >> 8) + (7 << 5));
+                output[oidx++] = (byte)(len - 7);
+              }
 
-                        if (len < 7)
-                        {
-                            output[oidx++] = (byte)((off >> 8) + (len << 5));
-                        }
-                        else
-                        {
-                            output[oidx++] = (byte)((off >> 8) + (7 << 5));
-                            output[oidx++] = (byte)(len - 7);
-                        }
+              output[oidx++] = (byte)off;
 
-                        output[oidx++] = (byte)off;
+              iidx += len - 1;
+              hval = (uint)(((input[iidx]) << 8) | input[iidx + 1]);
 
-                        iidx += len - 1;
-                        hval = (uint)(((input[iidx]) << 8) | input[iidx + 1]);
+              hval = (hval << 8) | input[iidx + 2];
+              HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
+              iidx++;
 
-                        hval = (hval << 8) | input[iidx + 2];
-                        HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
-                        iidx++;
-
-                        hval = (hval << 8) | input[iidx + 2];
-                        HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
-                        iidx++;
-                        continue;
-                    }
-                }
-                else if (iidx == inputLength)
-                    break;
-
-                /* one more literal byte we must copy */
-                lit++;
-                iidx++;
-
-                if (lit == MAX_LIT)
-                {
-                    if (oidx + 1 + MAX_LIT >= outputLength)
-                        return 0;
-
-                    output[oidx++] = (byte)(MAX_LIT - 1);
-                    lit = -lit;
-                    do
-                        output[oidx++] = input[iidx + lit];
-                    while ((++lit) != 0);
-                }
-            } // for
-        } // lock
-
-        if (lit != 0)
-        {
-            if (oidx + lit + 1 >= outputLength)
-                return 0;
-
-            output[oidx++] = (byte)(lit - 1);
-            lit = -lit;
-            do
-                output[oidx++] = input[iidx + lit];
-            while ((++lit) != 0);
-        }
-
-        return (int)oidx;
-    }
-
-    /// <summary>
-    /// Decompresses the data using LibLZF algorithm.
-    /// </summary>
-    /// <param name="input">Reference to the data to decompress.</param>
-    /// <param name="output">Reference to a buffer which will contain the decompressed data.</param>
-    /// <param name="inputLength">Length of input bytes to process.</param>
-    /// <returns>The size of the decompressed archive in the output buffer.</returns>
-    private static int lzf_decompress(byte[] input, ref byte[] output, int inputLength)
-    {
-        int outputLength = output.Length;
-
-        uint iidx = 0;
-        uint oidx = 0;
-
-        do
-        {
-            uint ctrl = input[iidx++];
-
-            if (ctrl < (1 << 5)) /* literal run */
-            {
-                ctrl++;
-
-                if (oidx + ctrl > outputLength)
-                {
-                    //SET_ERRNO (E2BIG);
-                    return 0;
-                }
-
-                do
-                    output[oidx++] = input[iidx++];
-                while ((--ctrl) != 0);
+              hval = (hval << 8) | input[iidx + 2];
+              HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
+              iidx++;
+              continue;
             }
-            else /* back reference */
-            {
-                uint len = ctrl >> 5;
-
-                int reference = (int)(oidx - ((ctrl & 0x1f) << 8) - 1);
-
-                if (len == 7)
-                    len += input[iidx++];
-
-                reference -= input[iidx++];
-
-                if (oidx + len + 2 > outputLength)
-                {
-                    //SET_ERRNO (E2BIG);
-                    return 0;
-                }
-
-                if (reference < 0)
-                {
-                    //SET_ERRNO (EINVAL);
-                    return 0;
-                }
-
-                output[oidx++] = output[reference++];
-                output[oidx++] = output[reference++];
-
-                do
-                    output[oidx++] = output[reference++];
-                while ((--len) != 0);
-            }
+        } else if (iidx == inputLength) {
+          break;
         }
-        while (iidx < inputLength);
 
-        return (int)oidx;
+        /* one more literal byte we must copy */
+        lit++;
+        iidx++;
+
+        if (lit == MAX_LIT) {
+          if (oidx + 1 + MAX_LIT >= outputLength) return 0;
+
+          output[oidx++] = (byte)(MAX_LIT - 1);
+          lit = -lit;
+          do {
+            output[oidx++] = input[iidx + lit];
+          } while ((++lit) != 0);
+        }
+      } // for
+    } // lock
+
+    if (lit != 0) {
+      if (oidx + lit + 1 >= outputLength)
+          return 0;
+
+      output[oidx++] = (byte)(lit - 1);
+      lit = -lit;
+      do {
+        output[oidx++] = input[iidx + lit];
+      } while ((++lit) != 0);
     }
 
-    #endregion
+    return (int)oidx;
+  }
+
+  /// <summary>
+  /// Decompresses the data using LibLZF algorithm.
+  /// </summary>
+  /// <param name="input">Reference to the data to decompress.</param>
+  /// <param name="output">Reference to a buffer which will contain the decompressed data.</param>
+  /// <param name="inputLength">Length of input bytes to process.</param>
+  /// <returns>The size of the decompressed archive in the output buffer.</returns>
+  private static int lzf_decompress(byte[] input, ref byte[] output, int inputLength) {
+    int outputLength = output.Length;
+
+    uint iidx = 0;
+    uint oidx = 0;
+
+    do {
+      uint ctrl = input[iidx++];
+
+      if (ctrl < (1 << 5))  { /* literal run */
+        ctrl++;
+
+        if (oidx + ctrl > outputLength) {
+          //SET_ERRNO (E2BIG);
+          return 0;
+        }
+
+        do {
+          output[oidx++] = input[iidx++];
+        } while ((--ctrl) != 0);
+      } else { /* back reference */
+        uint len = ctrl >> 5;
+
+        int reference = (int)(oidx - ((ctrl & 0x1f) << 8) - 1);
+
+        if (len == 7) len += input[iidx++];
+
+        reference -= input[iidx++];
+
+        if (oidx + len + 2 > outputLength) return 0;
+
+        if (reference < 0) return 0;
+
+        output[oidx++] = output[reference++];
+        output[oidx++] = output[reference++];
+
+        do {
+          output[oidx++] = output[reference++];
+        } while ((--len) != 0);
+      }
+    } while (iidx < inputLength);
+    return (int)oidx;
+  }
 
 }
