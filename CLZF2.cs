@@ -212,17 +212,17 @@ public class CLZF2 {
   /// <summary>
   /// Compresses the data using LibLZF algorithm.
   /// </summary>
-  /// <param name="inputPtr">Reference to the data to compress.</param>
-  /// <param name="outputPtr">Reference to a buffer which will contain the compressed data.</param>
-  /// <param name="inputLength">Length of input bytes to process.</param>
+  /// <param name="src">Reference to the data to compress.</param>
+  /// <param name="dst">Reference to a buffer which will contain the compressed data.</param>
+  /// <param name="srcLen">Length of input bytes to process.</param>
   /// <returns>The size of the compressed archive in the output buffer.</returns>
-  private static unsafe int lzf_compress(byte* inputPtr, byte* outputPtr, int inputLength, int outputLength) {
+  private static unsafe int lzf_compress(byte* src, byte* dst, int srcLen, int dstLen) {
     long hslot;
     uint iidx = 0;
     uint oidx = 0;
     long reference;
 
-    uint hval = (uint)(((inputPtr[iidx]) << 8) | inputPtr[iidx + 1]); // FRST(in_data, iidx);
+    uint hval = (uint)((*src << 8) | src[1]); // FRST(in_data, iidx);
     long off;
     int lit = 0;
 
@@ -231,36 +231,36 @@ public class CLZF2 {
       lock (hashTableLock) {
         Array.Clear(HashTable, 0, (int)HSIZE);
         for (;;) {
-          if (iidx < inputLength - 2) {
-            hval = (hval << 8) | inputPtr[iidx + 2];
+          if (iidx < srcLen - 2) {
+            hval = (hval << 8) | src[iidx + 2];
             hslot = ((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1));
             reference = table[hslot];
             table[hslot] = (long)iidx;
 
             if ((off = iidx - reference - 1) < MAX_OFF
-                && iidx + 4 < inputLength
+                && iidx + 4 < srcLen
                 && reference > 0
-                && inputPtr[reference + 0] == inputPtr[iidx + 0]
-                && inputPtr[reference + 1] == inputPtr[iidx + 1]
-                && inputPtr[reference + 2] == inputPtr[iidx + 2]
+                && src[reference + 0] == src[iidx + 0]
+                && src[reference + 1] == src[iidx + 1]
+                && src[reference + 2] == src[iidx + 2]
                 )
             {
               /* match found at *reference++ */
               uint len = 2;
-              uint maxlen = (uint)inputLength - iidx - len;
+              uint maxlen = (uint)srcLen - iidx - len;
               maxlen = maxlen > MAX_REF ? MAX_REF : maxlen;
 
-              if (oidx + lit + 1 + 3 >= outputLength) return 0;
+              if (oidx + lit + 1 + 3 >= dstLen) return 0;
 
               do {
                 len++;
-              } while (len < maxlen && inputPtr[reference + len] == inputPtr[iidx + len]);
+              } while (len < maxlen && src[reference + len] == src[iidx + len]);
 
               if (lit != 0) {
-                outputPtr[oidx++] = (byte)(lit - 1);
+                dst[oidx++] = (byte)(lit - 1);
                 lit = -lit;
                 do {
-                  outputPtr[oidx++] = inputPtr[iidx + lit];
+                  dst[oidx++] = src[iidx + lit];
                 } while ((++lit) != 0);
               }
 
@@ -268,27 +268,27 @@ public class CLZF2 {
               iidx++;
 
               if (len < 7) {
-                outputPtr[oidx++] = (byte)((off >> 8) + (len << 5));
+                dst[oidx++] = (byte)((off >> 8) + (len << 5));
               } else {
-                outputPtr[oidx++] = (byte)((off >> 8) + (7 << 5));
-                outputPtr[oidx++] = (byte)(len - 7);
+                dst[oidx++] = (byte)((off >> 8) + (7 << 5));
+                dst[oidx++] = (byte)(len - 7);
               }
 
-              outputPtr[oidx++] = (byte)off;
+              dst[oidx++] = (byte)off;
 
               iidx += len - 1;
-              hval = (uint)(((inputPtr[iidx]) << 8) | inputPtr[iidx + 1]);
+              hval = (uint)(((src[iidx]) << 8) | src[iidx + 1]);
 
-              hval = (hval << 8) | inputPtr[iidx + 2];
+              hval = (hval << 8) | src[iidx + 2];
               table[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
               iidx++;
 
-              hval = (hval << 8) | inputPtr[iidx + 2];
+              hval = (hval << 8) | src[iidx + 2];
               table[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
               iidx++;
               continue;
             }
-          } else if (iidx == inputLength) {
+          } else if (iidx == srcLen) {
             break;
           }
 
@@ -297,25 +297,25 @@ public class CLZF2 {
           iidx++;
 
           if (lit == MAX_LIT) {
-            if (oidx + 1 + MAX_LIT >= outputLength) return 0;
+            if (oidx + 1 + MAX_LIT >= dstLen) return 0;
 
-            outputPtr[oidx++] = (byte)(MAX_LIT - 1);
+            dst[oidx++] = (byte)(MAX_LIT - 1);
             lit = -lit;
             do {
-              outputPtr[oidx++] = inputPtr[iidx + lit];
+              dst[oidx++] = src[iidx + lit];
             } while ((++lit) != 0);
           }
         } // for
       } // lock
 
       if (lit != 0) {
-        if (oidx + lit + 1 >= outputLength)
+        if (oidx + lit + 1 >= dstLen)
             return 0;
 
-        outputPtr[oidx++] = (byte)(lit - 1);
+        dst[oidx++] = (byte)(lit - 1);
         lit = -lit;
         do {
-          outputPtr[oidx++] = inputPtr[iidx + lit];
+          dst[oidx++] = src[iidx + lit];
         } while ((++lit) != 0);
       }
     } // fixed
@@ -331,42 +331,44 @@ public class CLZF2 {
   /// <param name="srcLen">Length of input bytes to process.</param>
   /// <returns>The size of the decompressed archive in the output buffer.</returns>
   private static unsafe int lzf_decompress(byte* src, byte* dst, int srcLen, int dstLen) {
-    uint iidx = 0;
-    uint oidx = 0;
+    byte* srcEnd = src + srcLen;
+    byte* dstStart = dst;
+    byte* dstEnd = dst + dstLen;
 
     do {
-      uint ctrl = src[iidx++];
+      uint ctrl = *src++;
 
       if (ctrl < (1 << 5))  { /* literal run */
         ctrl++;
 
-        if (oidx + ctrl > dstLen) return 0;
+        if (dst + ctrl > dstEnd) return 0;
 
         do {
-          dst[oidx++] = src[iidx++];
+          *dst++ = *src++;
         } while ((--ctrl) != 0);
       } else { /* back reference */
         uint len = ctrl >> 5;
 
-        int reference = (int)(oidx - ((ctrl & 0x1f) << 8) - 1);
+        int reference = (int)((dst - dstStart) - ((ctrl & 0x1f) << 8) - 1);
 
-        if (len == 7) len += src[iidx++];
+        if (len == 7) len += *src++;
 
-        reference -= src[iidx++];
+        reference -= *src++;
 
-        if (oidx + len + 2 > dstLen) return 0;
-
+        if (dst + len + 2 > dstEnd) return 0;
         if (reference < 0) return 0;
 
-        dst[oidx++] = dst[reference++];
-        dst[oidx++] = dst[reference++];
+        byte* refPtr = dstStart + reference;
+
+        *dst++ = *refPtr++;
+        *dst++ = *refPtr++;
 
         do {
-          dst[oidx++] = dst[reference++];
+          *dst++ = *refPtr++;
         } while ((--len) != 0);
       }
-    } while (iidx < srcLen);
-    return (int)oidx;
+    } while (src < srcEnd);
+    return (int)(dst - dstStart);
   }
 
 }
