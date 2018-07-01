@@ -1,0 +1,7 @@
+{
+  "author": "Hourai Teahouse",
+  "name": "com.houraiteahouse.lz4",
+  "displayName": "LZ4 Binary Compression",
+  "version": "0.0.1",
+  "description": "LZ4 Binary Compression library"
+}
