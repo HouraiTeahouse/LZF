@@ -1,7 +1,7 @@
 {
-    "name": "LZF",
+    "name": "com.houraiteahouse.lz4.Runtime",
     "references": [
-        "HouraiCore"
+        "com.houraiteahouse.core.Runtime"
     ],
     "optionalUnityReferences": [],
     "includePlatforms": [],
