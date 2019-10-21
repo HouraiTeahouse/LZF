@@ -2,9 +2,9 @@
   "author": "Hourai Teahouse",
   "name": "com.houraiteahouse.lz4",
   "displayName": "LZ4 Binary Compression",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "LZ4 Binary Compression library",
   "dependencies": {
-    "com.houraiteahouse.core": "file:HouraiCOre"
+    "com.houraiteahouse.core": "1.0.0"
   }
 }
