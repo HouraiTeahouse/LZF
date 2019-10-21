@@ -9,7 +9,7 @@
   "repository": "github:HouraiTeahouse/LZF",
   "dependencies": {
     "com.houraiteahouse.core": "1.0.0"
-  }
+  },
   "publishConfig": {
     "registry": "https://upm.houraiteahouse.net"
   }
