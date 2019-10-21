@@ -37,23 +37,20 @@
  * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTH-
  * ERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
  * OF THE POSSIBILITY OF SUCH DAMAGE.
- * 
  */
-// TODO(james7132): Replace with System.Buffers.ArrayPool when Unity 2018.1b is ready
-using HouraiTeahouse;
 using System;
 using System.Runtime.InteropServices;
+using UnityEngine;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+
+namespace HouraiTeahouse.Compression {
 
 /// <summary>
-/// Improved C# LZF Compressor, a very small data compression library. The compression algorithm is extremely fast.
+/// Improved C# LZF Compressor, a very small data compression library. 
+/// The compression algorithm is extremely fast.
 /// </summary>
-public class CLZF2 {
-
-  /// <summary>
-  /// Multiple of input size used to estimate work/output buffer size.
-  /// Larger values increase initial memory usage but potentially reduces number of allocations.
-  /// </summary>
-  private const int BUFFER_SIZE_ESTIMATE = 2;
+public static unsafe class CLZF2 {
 
   /// <summary>
   /// Size of hashtable is 2^HLOG bytes. 
@@ -63,25 +60,32 @@ public class CLZF2 {
   /// For a low-memory/faster configuration, use HLOG == 13;
   /// For best compression, use 15 or 16 (or more, up to 22).
   /// </summary>
-  private const uint HLOG = 14;
+  const uint HLOG = 14;
 
-  private const uint HSIZE = (1 << (int)HLOG);
-  private const uint MAX_LIT = (1 << 5);
-  private const uint MAX_OFF = (1 << 13);
-  private const uint MAX_REF = ((1 << 8) + (1 << 3));
+  const uint HSIZE = (1 << (int)HLOG);
+  const uint MAX_LIT = (1 << 5);
+  const uint MAX_OFF = (1 << 13);
+  const uint MAX_REF = ((1 << 8) + (1 << 3));
 
   /// <summary>
   /// Hashtable, that can be allocated only once.
   /// </summary>
-  private static readonly long[] HashTable = new long[HSIZE];
+  static readonly long* HashTable;
+
+  static CLZF2() {
+    HashTable = (long*)UnsafeUtility.Malloc(
+      HSIZE * sizeof(long),
+      UnsafeUtility.AlignOf<long>(),
+      Allocator.Persistent);
+  }
 
   /// <summary>
   /// Lock object for access to hashtable so that we can keep things thread safe.
   /// Still up to the caller to make sure any shared outputBuffer use is thread safe.
   /// </summary>
-  private static readonly object hashTableLock = new object();
+  static readonly object hashTableLock = new object();
 
-  /// <summary>
+    /// <summary>
   /// Compress input bytes.
   /// </summary>
   /// <param name="inputBytes">Bytes to compress.</param>
@@ -109,40 +113,29 @@ public class CLZF2 {
   /// <param name="inputBytes">Bytes to compress.</param>
   /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
   /// <returns>Length of output.</returns>
-  public static int Compress(byte[] inputBytes, ref byte[] outputBuffer) => Compress(inputBytes, ref outputBuffer, inputBytes.Length);
+  public static int Compress(byte[] inputBytes, ref byte[] outputBuffer) => 
+    Compress(inputBytes, ref outputBuffer, inputBytes.Length);
 
   /// <summary>
   /// Compress input bytes.
   /// </summary>
   /// <param name="inputBytes">Bytes to compress.</param>
-  /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
+  /// <param name="output">Output buffer. This may not be the same buffer by the time the function completes.</param>
   /// <param name="inputLength">Length of data in inputBytes.</param>
   /// <returns>Length of output.</returns>
-  public static unsafe int Compress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength) {
+  public static unsafe int Compress(byte[] input, ref byte[] output, int len) {
     // If byteCount is 0, increase buffer size and try again.
-    int byteCount;
-    int outputSize = inputBytes.Length;
-    fixed (byte* input = inputBytes) {
-      do {
+    int outputSize = Math.Min(1, input.Length);
+    fixed (byte* inputPtr = input) {
+      while (true) {
+        byte* buffer = stackalloc byte[outputSize];
         outputSize *= 2;
-        byteCount = TryCompress(input, ref outputBuffer, inputLength, outputSize);
-      } while (byteCount == 0);
-    }
-    return byteCount;
-  }
-
-  static unsafe int TryCompress(byte* input, ref byte[] output, int inputLength, int outputSize) {
-    byte* outputBuffer = stackalloc byte[outputSize];
-    int byteCount = lzf_compress(input, outputBuffer, inputLength, outputSize);
-    if (byteCount != 0) {
-      if (output == null || output.Length < outputSize)  {
-        var pool = ArrayPool<byte>.Shared; 
-        if (output != null) pool.Return(output);
-        output = pool.Rent(outputSize);
+        int count = TryCompress(inputPtr, buffer, len, outputSize);
+        if (count == 0) continue;
+        CopyBuffer(buffer, ref output, count);
+        return count;
       }
-      Marshal.Copy((IntPtr)outputBuffer, output, 0, outputSize);
     }
-    return byteCount;
   }
 
   /// <summary>
@@ -150,7 +143,7 @@ public class CLZF2 {
   /// </summary>
   /// <param name="inputBytes">Bytes to decompress.</param>
   /// <returns>Decompressed bytes.</returns>
-  public static byte[] Decompress(byte[] inputBytes) => Decompress(inputBytes, inputBytes.Length);
+  public static byte[] Decompress(byte[] input) => Decompress(input, input.Length);
 
   /// <summary>
   /// Decompress input bytes.
@@ -158,13 +151,13 @@ public class CLZF2 {
   /// <param name="inputBytes">Bytes to decompress.</param>
   /// <param name="inputLength">Length of data in inputBytes to decompress.</param>
   /// <returns>Decompressed bytes.</returns>
-  public static byte[] Decompress(byte[] inputBytes, int inputLength) {
-    byte[] tempBuffer = null;
-    int byteCount = Decompress(inputBytes, ref tempBuffer, inputLength);
+  public static byte[] Decompress(byte[] input, int len) {
+    byte[] temp = null;
+    int count = Decompress(input, ref temp, len);
 
-    byte[] outputBytes = new byte[byteCount];
-    Buffer.BlockCopy(tempBuffer, 0, outputBytes, 0, byteCount);
-    return outputBytes;
+    byte[] output = new byte[count];
+    Buffer.BlockCopy(temp, 0, output, 0, count);
+    return output;
   }
 
   /// <summary>
@@ -173,50 +166,51 @@ public class CLZF2 {
   /// <param name="inputBytes">Bytes to decompress.</param>
   /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
   /// <returns>Length of output.</returns>
-  public static int Decompress(byte[] inputBytes, ref byte[] outputBuffer) => Decompress(inputBytes, ref outputBuffer, inputBytes.Length);
+  public static int Decompress(byte[] input, ref byte[] output) => 
+    Decompress(input, ref output, input.Length);
 
   /// <summary>
   /// Decompress input bytes.
   /// </summary>
-  /// <param name="inputBytes">Bytes to decompress.</param>
+  /// <param name="input">Bytes to decompress.</param>
   /// <param name="outputBuffer">Output/work buffer. Upon completion, will contain the output.</param>
   /// <param name="inputLength">Length of data in inputBytes.</param>
   /// <returns>Length of output.</returns>
-  public static unsafe int Decompress(byte[] inputBytes, ref byte[] outputBuffer, int inputLength) {
+  public static unsafe int Decompress(byte[] input, ref byte[] output, int inputLength) {
     // If byteCount is 0, increase buffer size and try again.
-    int byteCount;
-    int outputSize = inputBytes.Length;
-    fixed (byte* input = inputBytes) {
-      do {
+    int outputSize = input.Length;
+    fixed (byte* inputPtr = input) {
+      while (true) {
+        byte* buffer = stackalloc byte[outputSize];
+        int count = TryDecompress(inputPtr, buffer, inputLength, outputSize);
         outputSize *= 2;
-        byteCount = TryDecompress(input, ref outputBuffer, inputLength, outputSize);
-      } while (byteCount == 0);
+        if (count == 0) continue;
+        CopyBuffer(buffer, ref output, count);
+        return count;
+      }
     }
-    return byteCount;
   }
 
-  static unsafe int TryDecompress(byte* input, ref byte[] output, int inputLength, int outputSize) {
-    byte* outputBuffer = stackalloc byte[outputSize];
-    int byteCount = lzf_decompress(input, outputBuffer, inputLength, outputSize);
-    if (byteCount != 0) {
-      if (output == null || output.Length < outputSize)  {
-        var pool = ArrayPool<byte>.Shared; 
-        if (output != null) pool.Return(output);
-        output = pool.Rent(outputSize);
-      }
-      Marshal.Copy((IntPtr)outputBuffer, output, 0, outputSize);
+  static unsafe byte[] CopyBuffer(byte* buffer, ref byte[] output, int count) {
+    if (output == null || count > output.Length) {
+      var pool = ArrayPool<byte>.Shared; 
+      if (output != null) pool.Return(output);
+      output = pool.Rent(count);
     }
-    return byteCount;
+    fixed (byte* outputPtr = output) {
+      UnsafeUtility.MemCpy(outputPtr, buffer, count);
+    }
+    return output;
   }
 
   /// <summary>
-  /// Compresses the data using LibLZF algorithm.
+  /// Attempts to compress data using LibLZF algorithm.
   /// </summary>
   /// <param name="src">Reference to the data to compress.</param>
   /// <param name="dst">Reference to a buffer which will contain the compressed data.</param>
   /// <param name="srcLen">Length of input bytes to process.</param>
-  /// <returns>The size of the compressed archive in the output buffer.</returns>
-  private static unsafe int lzf_compress(byte* src, byte* dst, int srcLen, int dstLen) {
+  /// <returns>The size of the compressed archive in the output buffer. If non-positive, compression failed.</returns>
+  public static unsafe int TryCompress(byte* src, byte* dst, int srcLen, int dstLen) {
     long hslot;
     uint iidx = 0;
     uint oidx = 0;
@@ -226,99 +220,97 @@ public class CLZF2 {
     long off;
     int lit = 0;
 
-    fixed (long* table = HashTable) {
-      // Lock so we have exclusive access to hashtable.
-      lock (hashTableLock) {
-        Array.Clear(HashTable, 0, (int)HSIZE);
-        for (;;) {
-          if (iidx < srcLen - 2) {
-            hval = (hval << 8) | src[iidx + 2];
-            hslot = ((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1));
-            reference = table[hslot];
-            table[hslot] = (long)iidx;
+    // Lock so we have exclusive access to hashtable.
+    lock (hashTableLock) {
+      UnsafeUtility.MemClear(HashTable, HSIZE * sizeof(long));
+      for (;;) {
+        if (iidx < srcLen - 2) {
+          hval = (hval << 8) | src[iidx + 2];
+          hslot = ((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1));
+          reference = HashTable[hslot];
+          HashTable[hslot] = (long)iidx;
 
-            if ((off = iidx - reference - 1) < MAX_OFF
-                && iidx + 4 < srcLen
-                && reference > 0
-                && src[reference + 0] == src[iidx + 0]
-                && src[reference + 1] == src[iidx + 1]
-                && src[reference + 2] == src[iidx + 2]
-                )
-            {
-              /* match found at *reference++ */
-              uint len = 2;
-              uint maxlen = (uint)srcLen - iidx - len;
-              maxlen = maxlen > MAX_REF ? MAX_REF : maxlen;
+          if ((off = iidx - reference - 1) < MAX_OFF
+              && iidx + 4 < srcLen
+              && reference > 0
+              && src[reference + 0] == src[iidx + 0]
+              && src[reference + 1] == src[iidx + 1]
+              && src[reference + 2] == src[iidx + 2]
+              )
+          {
+            /* match found at *reference++ */
+            uint len = 2;
+            uint maxlen = (uint)srcLen - iidx - len;
+            maxlen = maxlen > MAX_REF ? MAX_REF : maxlen;
 
-              if (oidx + lit + 1 + 3 >= dstLen) return 0;
+            if (oidx + lit + 1 + 3 >= dstLen) return 0;
 
-              do {
-                len++;
-              } while (len < maxlen && src[reference + len] == src[iidx + len]);
-
-              if (lit != 0) {
-                dst[oidx++] = (byte)(lit - 1);
-                lit = -lit;
-                do {
-                  dst[oidx++] = src[iidx + lit];
-                } while ((++lit) != 0);
-              }
-
-              len -= 2;
-              iidx++;
-
-              if (len < 7) {
-                dst[oidx++] = (byte)((off >> 8) + (len << 5));
-              } else {
-                dst[oidx++] = (byte)((off >> 8) + (7 << 5));
-                dst[oidx++] = (byte)(len - 7);
-              }
-
-              dst[oidx++] = (byte)off;
-
-              iidx += len - 1;
-              hval = (uint)(((src[iidx]) << 8) | src[iidx + 1]);
-
-              hval = (hval << 8) | src[iidx + 2];
-              table[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
-              iidx++;
-
-              hval = (hval << 8) | src[iidx + 2];
-              table[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
-              iidx++;
-              continue;
-            }
-          } else if (iidx == srcLen) {
-            break;
-          }
-
-          /* one more literal byte we must copy */
-          lit++;
-          iidx++;
-
-          if (lit == MAX_LIT) {
-            if (oidx + 1 + MAX_LIT >= dstLen) return 0;
-
-            dst[oidx++] = (byte)(MAX_LIT - 1);
-            lit = -lit;
             do {
-              dst[oidx++] = src[iidx + lit];
-            } while ((++lit) != 0);
+              len++;
+            } while (len < maxlen && src[reference + len] == src[iidx + len]);
+
+            if (lit != 0) {
+              dst[oidx++] = (byte)(lit - 1);
+              lit = -lit;
+              do {
+                dst[oidx++] = src[iidx + lit];
+              } while ((++lit) != 0);
+            }
+
+            len -= 2;
+            iidx++;
+
+            if (len < 7) {
+              dst[oidx++] = (byte)((off >> 8) + (len << 5));
+            } else {
+              dst[oidx++] = (byte)((off >> 8) + (7 << 5));
+              dst[oidx++] = (byte)(len - 7);
+            }
+
+            dst[oidx++] = (byte)off;
+
+            iidx += len - 1;
+            hval = (uint)(((src[iidx]) << 8) | src[iidx + 1]);
+
+            hval = (hval << 8) | src[iidx + 2];
+            HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
+            iidx++;
+
+            hval = (hval << 8) | src[iidx + 2];
+            HashTable[((hval ^ (hval << 5)) >> (int)(((3 * 8 - HLOG)) - hval * 5) & (HSIZE - 1))] = iidx;
+            iidx++;
+            continue;
           }
-        } // for
-      } // lock
+        } else if (iidx == srcLen) {
+          break;
+        }
 
-      if (lit != 0) {
-        if (oidx + lit + 1 >= dstLen)
-            return 0;
+        /* one more literal byte we must copy */
+        lit++;
+        iidx++;
 
-        dst[oidx++] = (byte)(lit - 1);
-        lit = -lit;
-        do {
-          dst[oidx++] = src[iidx + lit];
-        } while ((++lit) != 0);
-      }
-    } // fixed
+        if (lit == MAX_LIT) {
+          if (oidx + 1 + MAX_LIT >= dstLen) return 0;
+
+          dst[oidx++] = (byte)(MAX_LIT - 1);
+          lit = -lit;
+          do {
+            dst[oidx++] = src[iidx + lit];
+          } while ((++lit) != 0);
+        }
+      } // for
+    } // lock
+
+    if (lit != 0) {
+      if (oidx + lit + 1 >= dstLen)
+          return 0;
+
+      dst[oidx++] = (byte)(lit - 1);
+      lit = -lit;
+      do {
+        dst[oidx++] = src[iidx + lit];
+      } while ((++lit) != 0);
+    }
 
     return (int)oidx;
   }
@@ -330,7 +322,7 @@ public class CLZF2 {
   /// <param name="dst">Reference to a buffer which will contain the decompressed data.</param>
   /// <param name="srcLen">Length of input bytes to process.</param>
   /// <returns>The size of the decompressed archive in the output buffer.</returns>
-  private static unsafe int lzf_decompress(byte* src, byte* dst, int srcLen, int dstLen) {
+  public static unsafe int TryDecompress(byte* src, byte* dst, int srcLen, int dstLen) {
     byte* srcEnd = src + srcLen;
     byte* dstStart = dst;
     byte* dstEnd = dst + dstLen;
@@ -370,5 +362,7 @@ public class CLZF2 {
     } while (src < srcEnd);
     return (int)(dst - dstStart);
   }
+
+}
 
 }
