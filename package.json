@@ -2,13 +2,13 @@
   "author": "Hourai Teahouse",
   "name": "com.houraiteahouse.lz4",
   "displayName": "LZ4 Binary Compression",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "LZ4 Binary Compression library",
   "homepage": "https://github.com/HouraiTeahouse/LZF",
   "bugs": "https://github.com/HouraiTeahouse/LZF/issues",
   "repository": "github:HouraiTeahouse/LZF",
   "dependencies": {
-    "com.houraiteahouse.core": "1.0.0"
+    "com.houraiteahouse.core": "1.0.1"
   },
   "publishConfig": {
     "registry": "https://upm.houraiteahouse.net"

@@ -39,6 +39,7 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 using System;
+using System.Buffers;
 using System.Runtime.InteropServices;
 using UnityEngine;
 using Unity.Collections;
